@@ -1,0 +1,13 @@
+# Render Blueprint — نشر بوت التحميل على الخطة المجانية (بدون بطاقة بنكية)
+services:
+  - type: web
+    name: tg-dlbot
+    runtime: docker
+    plan: free
+    envVars:
+      - key: MODE
+        value: webhook
+      - key: BOT_TOKEN
+        sync: false # عيّنه من لوحة Render بعد النشر
+      - key: CHANNEL
+        sync: false # مثال: @mychannel — عيّنه من لوحة Render بعد النشر
