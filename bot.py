@@ -125,8 +125,21 @@ async def check_sub_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+def count_cookies(path: Path) -> int:
+    """يعدّ سطور الكوكيز الصالحة (7 حقول مفصولة بتاب) للتشخيص."""
+    try:
+        n = 0
+        for line in path.read_text().splitlines():
+            if line and not line.startswith("# ") and line.count("\t") == 6:
+                n += 1
+        return n
+    except Exception:
+        return 0
+
+
 def download_sync(url: str, outdir: str) -> Path | None:
     """يحمّل الفيديو بـ yt-dlp ويرجع مسار الملف أو None عند الفشل."""
+    is_youtube = "youtube.com" in url or "youtu.be" in url
     cmd = [
         "yt-dlp",
         "--no-playlist",
@@ -134,18 +147,29 @@ def download_sync(url: str, outdir: str) -> Path | None:
         "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
         "--merge-output-format", "mp4",
         "-o", os.path.join(outdir, "%(title).60s.%(ext)s"),
-        url,
     ]
-    # كوكيز انستغرام/فيسبوك (اختياري):
-    # - محلياً: ملف cookies.txt بجانب البوت
-    # - على Render: Secret File باسم cookies.txt (يُركّب تحت /etc/secrets/)
-    cookies = Path("cookies.txt")
-    if not cookies.exists():
-        _sf = Path("/etc/secrets/cookies.txt")
-        if _sf.exists():
-            cookies = _sf
-    if cookies.exists():
-        cmd[1:1] = ["--cookies", str(cookies)]
+    if is_youtube:
+        # يوتيوب يحجب عميل الويب من السيرفرات — عميل أندرويد يتجاوز الحجب (بدون كوكيز)
+        cmd += ["--extractor-args", "youtube:player_client=android"]
+    else:
+        # كوكيز انستغرام/فيسبوك (اختياري):
+        # - محلياً: ملف cookies.txt بجانب البوت
+        # - على Render: Secret File باسم cookies.txt (يُركّب تحت /etc/secrets/)
+        cookies = Path("cookies.txt")
+        if not cookies.exists():
+            _sf = Path("/etc/secrets/cookies.txt")
+            if _sf.exists():
+                cookies = _sf
+        if cookies.exists():
+            n = count_cookies(cookies)
+            log.info("cookies file: %s (%d valid cookies)", cookies, n)
+            if n > 0:
+                cmd += ["--cookies", str(cookies)]
+            else:
+                log.warning("cookies file has 0 valid lines — check tabs/paste format")
+        else:
+            log.info("no cookies file found")
+    cmd.append(url)
 
     log.info("downloading: %s", url)
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
