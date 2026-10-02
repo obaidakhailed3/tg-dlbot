@@ -194,6 +194,45 @@ def download_tiktok_api(url: str, outdir: str) -> Path | None:
         return None
 
 
+def download_instagram_embed(url: str, outdir: str) -> Path | None:
+    """احتياطي انستا: صفحة الـ embed الرسمية تعطي رابط الفيديو المباشر بدون تسجيل دخول."""
+    import urllib.request
+
+    try:
+        m = re.search(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", url)
+        if not m:
+            return None
+        shortcode = m.group(1)
+        kind = "reel" if "/reel" in url else "p"
+        embed = f"https://www.instagram.com/{kind}/{shortcode}/embed/captioned/"
+        req = urllib.request.Request(embed, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            html = r.read().decode("utf-8", errors="ignore")
+        i = html.find("video_url")
+        if i < 0:
+            return None
+        j = html.find("https:", i)
+        k = html.find('\\\"', j)
+        raw = html[j:k]
+        vurl = re.sub(r"\\\\u([0-9a-fA-F]{4})", lambda mm: chr(int(mm.group(1), 16)), raw)
+        vurl = vurl.replace(chr(92), "")
+        if not (vurl.startswith("https://") and ".mp4" in vurl):
+            return None
+        out = Path(outdir) / "ig_embed.mp4"
+        req2 = urllib.request.Request(
+            vurl, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.instagram.com/"}
+        )
+        with urllib.request.urlopen(req2, timeout=120) as r, open(out, "wb") as f:
+            shutil.copyfileobj(r, f)
+        if out.stat().st_size > 0:
+            log.info("instagram embed fallback OK (%d bytes)", out.stat().st_size)
+            return out
+        return None
+    except Exception as e:
+        log.warning("instagram embed fallback failed: %s", e)
+        return None
+
+
 def download_sync(url: str, outdir: str) -> Path | None:
     """يحمّل الفيديو بـ yt-dlp ويرجع مسار الملف أو None عند الفشل."""
     is_youtube = "youtube.com" in url or "youtu.be" in url
@@ -208,6 +247,15 @@ def download_sync(url: str, outdir: str) -> Path | None:
         plans = [{"args": [], "cookies": True}]
 
     cookies = find_cookies()
+    is_tiktok = "tiktok.com" in url
+    is_instagram = "instagram.com" in url
+    # تيك توك: الـ API أولاً (سريع ومضمون — يتجاوز حجب IP السيرفر)، ثم yt-dlp
+    if is_tiktok:
+        log.info("tiktok: trying api first for: %s", url)
+        api_path = download_tiktok_api(url, outdir)
+        if api_path:
+            return api_path
+        log.info("tiktok api failed, falling back to yt-dlp")
     for i, plan in enumerate(plans):
         cmd = [
             "yt-dlp",
@@ -228,10 +276,10 @@ def download_sync(url: str, outdir: str) -> Path | None:
             if files:
                 return files[0]
         log.warning("yt-dlp attempt %d failed: %s", i + 1, proc.stderr[:800])
-    # احتياطي تيك توك: إذا فشل yt-dlp (حجب IP السيرفر)، جرّب API خارجي
-    if "tiktok.com" in url:
-        log.info("trying tiktok api fallback for: %s", url)
-        return download_tiktok_api(url, outdir)
+    # احتياطي انستا: صفحة الـ embed عند فشل yt-dlp
+    if is_instagram:
+        log.info("trying instagram embed fallback for: %s", url)
+        return download_instagram_embed(url, outdir)
     return None
 
 
