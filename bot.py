@@ -137,47 +137,61 @@ def count_cookies(path: Path) -> int:
         return 0
 
 
+def find_cookies() -> Path | None:
+    """يلكّي ملف الكوكيز (محلياً أو Secret File على Render) إن وجد وكان صالحاً."""
+    # - محلياً: ملف cookies.txt بجانب البوت
+    # - على Render: Secret File باسم cookies.txt (يُركّب تحت /etc/secrets/)
+    c = Path("cookies.txt")
+    if not c.exists():
+        _sf = Path("/etc/secrets/cookies.txt")
+        if _sf.exists():
+            c = _sf
+    if not c.exists():
+        log.info("no cookies file found")
+        return None
+    n = count_cookies(c)
+    log.info("cookies file: %s (%d valid cookies)", c, n)
+    if n == 0:
+        log.warning("cookies file has 0 valid lines — check tabs/paste format")
+        return None
+    return c
+
+
 def download_sync(url: str, outdir: str) -> Path | None:
     """يحمّل الفيديو بـ yt-dlp ويرجع مسار الملف أو None عند الفشل."""
     is_youtube = "youtube.com" in url or "youtu.be" in url
-    cmd = [
-        "yt-dlp",
-        "--no-playlist",
-        "--max-filesize", "1000M",  # سقف أمان للتحميل؛ حد الإرسال يُعالَج بالتقسيم
-        "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
-        "--merge-output-format", "mp4",
-        "-o", os.path.join(outdir, "%(title).60s.%(ext)s"),
-    ]
     if is_youtube:
-        # يوتيوب يحجب عميل الويب من السيرفرات — عميل أندرويد يتجاوز الحجب (بدون كوكيز)
-        cmd += ["--extractor-args", "youtube:player_client=android"]
+        # يوتيوب: المحاولة 1 = عميل أندرويد (سريع، بدون كوكيز)
+        #         المحاولة 2 = العميل الافتراضي + الكوكيز (deno يحل تحديات الجافاسكربت)
+        plans = [
+            {"args": ["--extractor-args", "youtube:player_client=android"], "cookies": False},
+            {"args": [], "cookies": True},
+        ]
     else:
-        # كوكيز انستغرام/فيسبوك (اختياري):
-        # - محلياً: ملف cookies.txt بجانب البوت
-        # - على Render: Secret File باسم cookies.txt (يُركّب تحت /etc/secrets/)
-        cookies = Path("cookies.txt")
-        if not cookies.exists():
-            _sf = Path("/etc/secrets/cookies.txt")
-            if _sf.exists():
-                cookies = _sf
-        if cookies.exists():
-            n = count_cookies(cookies)
-            log.info("cookies file: %s (%d valid cookies)", cookies, n)
-            if n > 0:
-                cmd += ["--cookies", str(cookies)]
-            else:
-                log.warning("cookies file has 0 valid lines — check tabs/paste format")
-        else:
-            log.info("no cookies file found")
-    cmd.append(url)
+        plans = [{"args": [], "cookies": True}]
 
-    log.info("downloading: %s", url)
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    if proc.returncode != 0:
-        log.warning("yt-dlp failed: %s", proc.stderr[-500:])
-        return None
-    files = sorted(Path(outdir).glob("*"), key=lambda p: p.stat().st_size, reverse=True)
-    return files[0] if files else None
+    cookies = find_cookies()
+    for i, plan in enumerate(plans):
+        cmd = [
+            "yt-dlp",
+            "--no-playlist",
+            "--max-filesize", "1000M",  # سقف أمان للتحميل؛ حد الإرسال يُعالَج بالتقسيم
+            "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+            "--merge-output-format", "mp4",
+            "-o", os.path.join(outdir, "%(title).60s.%(ext)s"),
+        ] + plan["args"]
+        if plan["cookies"] and cookies:
+            cmd += ["--cookies", str(cookies)]
+        cmd.append(url)
+
+        log.info("downloading (attempt %d/%d): %s", i + 1, len(plans), url)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if proc.returncode == 0:
+            files = sorted(Path(outdir).glob("*"), key=lambda p: p.stat().st_size, reverse=True)
+            if files:
+                return files[0]
+        log.warning("yt-dlp attempt %d failed: %s", i + 1, proc.stderr[-300:])
+    return None
 
 
 def split_video(src: Path, tmp: Path, max_mb: int) -> list[Path]:
