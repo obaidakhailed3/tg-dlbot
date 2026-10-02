@@ -96,6 +96,32 @@ async def require_subscription(update: Update, context: ContextTypes.DEFAULT_TYP
     return False
 
 
+BOT_VERSION = "2026-10-02-v6 (tiktok-api + ig-embed + yt-fallbacks)"
+
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """أمر تشخيصي: يعرض حالة الكوكيز وdeno وyt-dlp."""
+    if not await require_subscription(update, context):
+        return
+    lines = [f"🤖 النسخة: {BOT_VERSION}", ""]
+    # الكوكيز
+    ck = find_cookies()
+    if ck:
+        lines.append(f"🍪 الكوكيز: ✅ موجود ({count_cookies(ck)} سطر صالح)")
+    else:
+        lines.append("🍪 الكوكيز: ❌ غير موجود")
+    # deno
+    deno = shutil.which("deno")
+    lines.append(f"🦕 deno: {'✅ ' + deno if deno else '❌ غير مثبت'}")
+    # yt-dlp
+    try:
+        v = subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True, timeout=15)
+        lines.append(f"⬇️ yt-dlp: {v.stdout.strip() or '؟'}")
+    except Exception as e:
+        lines.append(f"⬇️ yt-dlp: ❌ خطأ ({e})")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_subscription(update, context):
         return
@@ -379,6 +405,7 @@ def main():
         )
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", status_cmd))
     from telegram.ext import CallbackQueryHandler
     app.add_handler(CallbackQueryHandler(check_sub_button, pattern="^check_sub$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
