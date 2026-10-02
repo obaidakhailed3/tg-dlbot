@@ -17,6 +17,10 @@ import logging
 import math
 import os
 import re
+import shutil
+import subprocess
+import tempfile
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -157,6 +161,39 @@ def find_cookies() -> Path | None:
     return c
 
 
+def download_tiktok_api(url: str, outdir: str) -> Path | None:
+    """احتياطي تيك توك: عند حجب IP السيرفر من تيك توك، نحمّل عبر tikwm API
+    (سيرفراتهم غير محجوبة) — يرجع مسار MP4 بدون علامة مائية."""
+    import urllib.request
+    import urllib.parse
+    import json
+
+    try:
+        api = "https://www.tikwm.com/api/?url=" + urllib.parse.quote(url, safe="")
+        req = urllib.request.Request(api, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read().decode())
+        if data.get("code") != 0:
+            log.warning("tiktok api error: %s", data.get("msg"))
+            return None
+        play = (data.get("data") or {}).get("play")
+        if not play:
+            return None
+        out = Path(outdir) / "tiktok_api.mp4"
+        req2 = urllib.request.Request(
+            play, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.tikwm.com/"}
+        )
+        with urllib.request.urlopen(req2, timeout=180) as r, open(out, "wb") as f:
+            shutil.copyfileobj(r, f)
+        if out.stat().st_size > 0:
+            log.info("tiktok api fallback OK (%d bytes)", out.stat().st_size)
+            return out
+        return None
+    except Exception as e:
+        log.warning("tiktok api fallback failed: %s", e)
+        return None
+
+
 def download_sync(url: str, outdir: str) -> Path | None:
     """يحمّل الفيديو بـ yt-dlp ويرجع مسار الملف أو None عند الفشل."""
     is_youtube = "youtube.com" in url or "youtu.be" in url
@@ -190,7 +227,11 @@ def download_sync(url: str, outdir: str) -> Path | None:
             files = sorted(Path(outdir).glob("*"), key=lambda p: p.stat().st_size, reverse=True)
             if files:
                 return files[0]
-        log.warning("yt-dlp attempt %d failed: %s", i + 1, proc.stderr[-300:])
+        log.warning("yt-dlp attempt %d failed: %s", i + 1, proc.stderr[:800])
+    # احتياطي تيك توك: إذا فشل yt-dlp (حجب IP السيرفر)، جرّب API خارجي
+    if "tiktok.com" in url:
+        log.info("trying tiktok api fallback for: %s", url)
+        return download_tiktok_api(url, outdir)
     return None
 
 
