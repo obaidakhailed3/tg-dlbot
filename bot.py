@@ -17,10 +17,6 @@ import logging
 import math
 import os
 import re
-import shutil
-import subprocess
-import tempfile
-import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -129,158 +125,35 @@ async def check_sub_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-def count_cookies(path: Path) -> int:
-    """يعدّ سطور الكوكيز الصالحة (7 حقول مفصولة بتاب) للتشخيص."""
-    try:
-        n = 0
-        for line in path.read_text().splitlines():
-            if line and not line.startswith("# ") and line.count("\t") == 6:
-                n += 1
-        return n
-    except Exception:
-        return 0
-
-
-def find_cookies() -> Path | None:
-    """يلكّي ملف الكوكيز (محلياً أو Secret File على Render) إن وجد وكان صالحاً."""
-    # - محلياً: ملف cookies.txt بجانب البوت
-    # - على Render: Secret File باسم cookies.txt (يُركّب تحت /etc/secrets/)
-    c = Path("cookies.txt")
-    if not c.exists():
-        _sf = Path("/etc/secrets/cookies.txt")
-        if _sf.exists():
-            c = _sf
-    if not c.exists():
-        log.info("no cookies file found")
-        return None
-    n = count_cookies(c)
-    log.info("cookies file: %s (%d valid cookies)", c, n)
-    if n == 0:
-        log.warning("cookies file has 0 valid lines — check tabs/paste format")
-        return None
-    return c
-
-
-def download_tiktok_api(url: str, outdir: str) -> Path | None:
-    """احتياطي تيك توك: عند حجب IP السيرفر من تيك توك، نحمّل عبر tikwm API
-    (سيرفراتهم غير محجوبة) — يرجع مسار MP4 بدون علامة مائية."""
-    import urllib.request
-    import urllib.parse
-    import json
-
-    try:
-        api = "https://www.tikwm.com/api/?url=" + urllib.parse.quote(url, safe="")
-        req = urllib.request.Request(api, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            data = json.loads(r.read().decode())
-        if data.get("code") != 0:
-            log.warning("tiktok api error: %s", data.get("msg"))
-            return None
-        play = (data.get("data") or {}).get("play")
-        if not play:
-            return None
-        out = Path(outdir) / "tiktok_api.mp4"
-        req2 = urllib.request.Request(
-            play, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.tikwm.com/"}
-        )
-        with urllib.request.urlopen(req2, timeout=180) as r, open(out, "wb") as f:
-            shutil.copyfileobj(r, f)
-        if out.stat().st_size > 0:
-            log.info("tiktok api fallback OK (%d bytes)", out.stat().st_size)
-            return out
-        return None
-    except Exception as e:
-        log.warning("tiktok api fallback failed: %s", e)
-        return None
-
-
-def download_instagram_embed(url: str, outdir: str) -> Path | None:
-    """احتياطي انستا: صفحة الـ embed الرسمية تعطي رابط الفيديو المباشر بدون تسجيل دخول."""
-    import urllib.request
-
-    try:
-        m = re.search(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", url)
-        if not m:
-            return None
-        shortcode = m.group(1)
-        kind = "reel" if "/reel" in url else "p"
-        embed = f"https://www.instagram.com/{kind}/{shortcode}/embed/captioned/"
-        req = urllib.request.Request(embed, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            html = r.read().decode("utf-8", errors="ignore")
-        i = html.find("video_url")
-        if i < 0:
-            return None
-        j = html.find("https:", i)
-        k = html.find('\\\"', j)
-        raw = html[j:k]
-        vurl = re.sub(r"\\\\u([0-9a-fA-F]{4})", lambda mm: chr(int(mm.group(1), 16)), raw)
-        vurl = vurl.replace(chr(92), "")
-        if not (vurl.startswith("https://") and ".mp4" in vurl):
-            return None
-        out = Path(outdir) / "ig_embed.mp4"
-        req2 = urllib.request.Request(
-            vurl, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.instagram.com/"}
-        )
-        with urllib.request.urlopen(req2, timeout=120) as r, open(out, "wb") as f:
-            shutil.copyfileobj(r, f)
-        if out.stat().st_size > 0:
-            log.info("instagram embed fallback OK (%d bytes)", out.stat().st_size)
-            return out
-        return None
-    except Exception as e:
-        log.warning("instagram embed fallback failed: %s", e)
-        return None
-
-
 def download_sync(url: str, outdir: str) -> Path | None:
     """يحمّل الفيديو بـ yt-dlp ويرجع مسار الملف أو None عند الفشل."""
-    is_youtube = "youtube.com" in url or "youtu.be" in url
-    if is_youtube:
-        # يوتيوب: المحاولة 1 = عميل أندرويد (سريع، بدون كوكيز)
-        #         المحاولة 2 = العميل الافتراضي + الكوكيز (deno يحل تحديات الجافاسكربت)
-        plans = [
-            {"args": ["--extractor-args", "youtube:player_client=android"], "cookies": False},
-            {"args": [], "cookies": True},
-        ]
-    else:
-        plans = [{"args": [], "cookies": True}]
+    cmd = [
+        "yt-dlp",
+        "--no-playlist",
+        "--max-filesize", "1000M",  # سقف أمان للتحميل؛ حد الإرسال يُعالَج بالتقسيم
+        "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+        "--merge-output-format", "mp4",
+        "-o", os.path.join(outdir, "%(title).60s.%(ext)s"),
+        url,
+    ]
+    # كوكيز انستغرام/فيسبوك (اختياري):
+    # - محلياً: ملف cookies.txt بجانب البوت
+    # - على Render: Secret File باسم cookies.txt (يُركّب تحت /etc/secrets/)
+    cookies = Path("cookies.txt")
+    if not cookies.exists():
+        _sf = Path("/etc/secrets/cookies.txt")
+        if _sf.exists():
+            cookies = _sf
+    if cookies.exists():
+        cmd[1:1] = ["--cookies", str(cookies)]
 
-    cookies = find_cookies()
-    is_tiktok = "tiktok.com" in url
-    is_instagram = "instagram.com" in url
-    # تيك توك: الـ API أولاً (سريع ومضمون — يتجاوز حجب IP السيرفر)، ثم yt-dlp
-    if is_tiktok:
-        log.info("tiktok: trying api first for: %s", url)
-        api_path = download_tiktok_api(url, outdir)
-        if api_path:
-            return api_path
-        log.info("tiktok api failed, falling back to yt-dlp")
-    for i, plan in enumerate(plans):
-        cmd = [
-            "yt-dlp",
-            "--no-playlist",
-            "--max-filesize", "1000M",  # سقف أمان للتحميل؛ حد الإرسال يُعالَج بالتقسيم
-            "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
-            "--merge-output-format", "mp4",
-            "-o", os.path.join(outdir, "%(title).60s.%(ext)s"),
-        ] + plan["args"]
-        if plan["cookies"] and cookies:
-            cmd += ["--cookies", str(cookies)]
-        cmd.append(url)
-
-        log.info("downloading (attempt %d/%d): %s", i + 1, len(plans), url)
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if proc.returncode == 0:
-            files = sorted(Path(outdir).glob("*"), key=lambda p: p.stat().st_size, reverse=True)
-            if files:
-                return files[0]
-        log.warning("yt-dlp attempt %d failed: %s", i + 1, proc.stderr[:800])
-    # احتياطي انستا: صفحة الـ embed عند فشل yt-dlp
-    if is_instagram:
-        log.info("trying instagram embed fallback for: %s", url)
-        return download_instagram_embed(url, outdir)
-    return None
+    log.info("downloading: %s", url)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0:
+        log.warning("yt-dlp failed: %s", proc.stderr[-500:])
+        return None
+    files = sorted(Path(outdir).glob("*"), key=lambda p: p.stat().st_size, reverse=True)
+    return files[0] if files else None
 
 
 def split_video(src: Path, tmp: Path, max_mb: int) -> list[Path]:
