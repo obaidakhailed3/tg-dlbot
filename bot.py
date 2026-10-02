@@ -14,6 +14,7 @@
 
 import asyncio
 import logging
+import math
 import os
 import re
 import subprocess
@@ -34,7 +35,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "PUT_YOUR_TOKEN_HERE")
 CHANNEL = os.environ.get("CHANNEL", "@PUT_CHANNEL_USERNAME")  # مثال: @yalanchi
 # MODE: ‏"polling" للتلفون/اللابتوب، "webhook" للسيرفر (Render)
 MODE = os.environ.get("MODE", "polling").lower()
-MAX_MB = 45  # حد حجم الفيديو (تيليغرام يسمح حتى 50MB للبوتات)
+MAX_MB = 48  # حد حجم الفيديو (تيليغرام يسمح حتى 50MB للبوتات)
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO
@@ -42,9 +43,11 @@ logging.basicConfig(
 log = logging.getLogger("dlbot")
 
 URL_RE = re.compile(r"https?://[^\s]+")
-# روابط انستا / فيس / تيك توك فقط
+# روابط المنصات المدعومة (نفس منصات التطبيق)
 ALLOWED_RE = re.compile(
-    r"https?://([a-z0-9-]+\.)?(instagram\.com|facebook\.com|fb\.watch|tiktok\.com|vt\.tiktok\.com)/",
+    r"https?://([a-z0-9-]+\.)?(instagram\.com|facebook\.com|fb\.watch|tiktok\.com|vt\.tiktok\.com"
+    r"|youtube\.com|youtu\.be|twitter\.com|x\.com|snapchat\.com"
+    r"|pinterest\.com|pin\.it|reddit\.com|dailymotion\.com|dai\.ly|vimeo\.com)/",
     re.IGNORECASE,
 )
 
@@ -97,7 +100,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📥 دزلي رابط فيديو من:\n"
         "• انستغرام\n"
         "• فيسبوك\n"
-        "• تيك توك\n\n"
+        "• تيك توك\n"
+        "• يوتيوب\n"
+        "• سناب شات\n"
+        "• بنترست\n"
+        "• تويتر\n"
+        "• ريدت\n\n"
         "وأنا أحمله وأدزه لك 🎬"
     )
 
@@ -122,14 +130,20 @@ def download_sync(url: str, outdir: str) -> Path | None:
     cmd = [
         "yt-dlp",
         "--no-playlist",
-        "--max-filesize", f"{MAX_MB}M",
+        "--max-filesize", "1000M",  # سقف أمان للتحميل؛ حد الإرسال يُعالَج بالتقسيم
         "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
         "--merge-output-format", "mp4",
         "-o", os.path.join(outdir, "%(title).60s.%(ext)s"),
         url,
     ]
-    # كوكيز انستغرام/فيسبوك (اختياري): ضع ملف cookies.txt بجانب البوت
+    # كوكيز انستغرام/فيسبوك (اختياري):
+    # - محلياً: ملف cookies.txt بجانب البوت
+    # - على Render: Secret File باسم cookies.txt (يُركّب تحت /etc/secrets/)
     cookies = Path("cookies.txt")
+    if not cookies.exists():
+        _sf = Path("/etc/secrets/cookies.txt")
+        if _sf.exists():
+            cookies = _sf
     if cookies.exists():
         cmd[1:1] = ["--cookies", str(cookies)]
 
@@ -140,6 +154,30 @@ def download_sync(url: str, outdir: str) -> Path | None:
         return None
     files = sorted(Path(outdir).glob("*"), key=lambda p: p.stat().st_size, reverse=True)
     return files[0] if files else None
+
+
+def split_video(src: Path, tmp: Path, max_mb: int) -> list[Path]:
+    """يقسّم الفيديو لأجزاء (كل جزء أقل من max_mb) بنسخ الستريم — سريع بدون إعادة ترميز."""
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(src)],
+        capture_output=True, text=True, timeout=60,
+    )
+    duration = float(probe.stdout.strip())
+    # هدف 40MB للجزء (هامش أمان تحت حد تليغرام 50MB)
+    n = max(2, math.ceil(src.stat().st_size / (40 * 1024 * 1024)))
+    part_dur = duration / n
+    out_pat = str(tmp / "part%02d.mp4")
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", str(src), "-c", "copy", "-map", "0",
+         "-f", "segment", "-segment_time", f"{part_dur:.2f}",
+         "-reset_timestamps", "1", out_pat],
+        capture_output=True, timeout=900, check=True,
+    )
+    parts = sorted(tmp.glob("part*.mp4"))
+    # تحقق: أي جزء ما زال أكبر من الحد يُستبعد (نادر — تقسيم الـkeyframes)
+    ok = [p for p in parts if p.stat().st_size <= max_mb * 1024 * 1024]
+    return ok if len(ok) == len(parts) and ok else []
 
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -154,7 +192,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not ALLOWED_RE.search(url):
         await update.message.reply_text(
-            "⚠️ البوت يدعم فقط روابط:\n• انستغرام\n• فيسبوك\n• تيك توك"
+            "⚠️ البوت يدعم روابط: انستغرام، فيسبوك، تيك توك، يوتيوب، سناب شات، بنترست، تويتر، ريدت"
         )
         return
 
@@ -168,15 +206,34 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if path is None or not path.exists():
                     await status.edit_text(
                         "❌ ما كدرت أحمّل الفيديو.\n"
-                        "يمكن الرابط خاص/محذوف، أو حجمه أكبر من 45MB."
+                        "يمكن الرابط خاص/محذوف."
                     )
                     return
-                await status.edit_text("📤 جاري الإرسال...")
-                with open(path, "rb") as f:
-                    await update.message.reply_video(
-                        video=f,
-                        caption="🎬 تفضل — حمّلته لك\n📢 " + channel_url(),
+                limit = MAX_MB * 1024 * 1024
+                if path.stat().st_size <= limit:
+                    targets = [(path, None)]
+                else:
+                    await status.edit_text("✂️ الفيديو طويل — جاري تقسيمه لأجزاء...")
+                    tmpdir = Path(tmp)
+                    parts = await loop.run_in_executor(
+                        None, split_video, path, tmpdir, MAX_MB
                     )
+                    if not parts:
+                        await status.edit_text(
+                            "❌ الفيديو كبير وما كدرت أقسّمه."
+                        )
+                        return
+                    targets = [
+                        (p, f"🎬 الجزء {i+1} من {len(parts)}\n📢 " + channel_url())
+                        for i, p in enumerate(parts)
+                    ]
+                await status.edit_text("📤 جاري الإرسال...")
+                for i, (vp, cap) in enumerate(targets):
+                    with open(vp, "rb") as f:
+                        await update.message.reply_video(
+                            video=f,
+                            caption=cap or ("🎬 تفضل — حمّلته لك\n📢 " + channel_url()),
+                        )
         except Exception as e:
             log.exception("download error")
             await status.edit_text("❌ صار خطأ أثناء التحميل، حاول مرة ثانية.")
